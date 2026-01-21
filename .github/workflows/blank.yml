@@ -1,36 +1,126 @@
-# This is a basic workflow to help you get started with Actions
+name: HLS Downloader
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
+    inputs:
+      hls_url:
+        description: 'URL do stream HLS'
+        required: true
+        type: string
+      output_format:
+        description: 'Formato de saída (mp4, mkv, avi, mov)'
+        required: false
+        default: 'mp4'
+        type: choice
+        options:
+          - mp4
+          - mkv
+          - avi
+          - mov
+      output_filename:
+        description: 'Nome do arquivo de saída (sem extensão)'
+        required: false
+        default: 'video'
+        type: string
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
+  download-and-encode:
     runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
+    permissions:
+      contents: write
+    
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
+    - name: Install FFmpeg
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+        echo "FFmpeg version:"
+        ffmpeg -version
 
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
-        run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+    - name: Create output directory
+      run: mkdir -p output
+
+    - name: Download and encode HLS stream
+      run: |
+        # Validar URL
+        if [[ -z "${{ github.event.inputs.hls_url }}" ]]; then
+          echo "❌ URL do HLS não fornecida"
+          exit 1
+        fi
+
+        # Definir nome do arquivo de saída
+        OUTPUT_FILE="output/${{ github.event.inputs.output_filename }}.${{ github.event.inputs.output_format }}"
+        
+        echo "📥 Baixando e convertendo stream HLS..."
+        echo "🔗 URL: ${{ github.event.inputs.hls_url }}"
+        echo "💾 Saída: $OUTPUT_FILE"
+        
+        # Baixar e converter o stream HLS
+        ffmpeg -i "${{ github.event.inputs.hls_url }}" \
+               -c copy \
+               -bsf:a aac_adtstoasc \
+               "$OUTPUT_FILE" \
+               -y
+        
+        # Verificar se o arquivo foi criado
+        if [ ! -f "$OUTPUT_FILE" ]; then
+          echo "❌ Falha ao criar o arquivo de saída"
+          exit 1
+        fi
+        
+        echo "✅ Conversão concluída com sucesso!"
+        echo "📊 Tamanho do arquivo: $(du -h "$OUTPUT_FILE" | cut -f1)"
+
+    - name: Upload artifact (backup temporário)
+      uses: actions/upload-artifact@v4
+      with:
+        name: converted-video
+        path: output/
+        retention-days: 2
+
+    - name: Generate valid tag name
+      id: tag_name
+      run: |
+        # Gerar um nome de tag válido (sem caracteres especiais)
+        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+        CLEAN_FILENAME=$(echo "${{ github.event.inputs.output_filename }}" | tr -cd '[:alnum:]-_')
+        TAG_NAME="video-${CLEAN_FILENAME}-${TIMESTAMP}"
+        echo "TAG_NAME=${TAG_NAME}" >> $GITHUB_OUTPUT
+        echo "Generated tag: ${TAG_NAME}"
+
+    - name: Create GitHub Release
+      id: create_release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.tag_name.outputs.TAG_NAME }}
+        name: "Ep - ${{ github.event.inputs.output_filename }}"
+        body: |
+          Vídeo convertido a partir de stream HLS
+          
+          **Detalhes:**
+          - **URL original:** ${{ github.event.inputs.hls_url }}
+          - **Formato:** ${{ github.event.inputs.output_format }}
+          - **Workflow ID:** ${{ github.run_id }}
+          
+          Arquivo gerado automaticamente pelo GitHub Actions.
+        files: output/${{ github.event.inputs.output_filename }}.${{ github.event.inputs.output_format }}
+        draft: false
+        prerelease: false
+
+    - name: Show download information
+      run: |
+        echo "🎉 Processamento concluído com sucesso!"
+        echo ""
+        echo "📦 RELEASE CRIADO:"
+        echo "🔗 URL do Release: ${{ steps.create_release.outputs.html_url }}"
+        echo "🏷️  Tag: ${{ steps.tag_name.outputs.TAG_NAME }}"
+        echo ""
+        echo "📥 Para baixar o arquivo:"
+        echo "1. Acesse a URL acima ou vá na aba 'Releases' do repositório"
+        echo "2. Procure pelo release com a tag: ${{ steps.tag_name.outputs.TAG_NAME }}"
+        echo "3. Baixe o arquivo diretamente do release"
+        echo ""
+        echo "💾 Arquivo: ${{ github.event.inputs.output_filename }}.${{ github.event.inputs.output_format }}"
