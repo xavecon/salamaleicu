@@ -1,0 +1,190 @@
+name: Download and Upload to Buzzheavier v2
+
+on:
+  workflow_dispatch:  # Execução manual
+    inputs:
+      file_url:
+        description: 'URL do arquivo para download'
+        required: true
+        type: string
+      file_name:
+        description: 'Nome do arquivo no destino (opcional)'
+        required: false
+        type: string
+      location_id:
+        description: 'ID da localização (Central Europe: 3eb9t1559lkv | Western US : 95542dt0et21 | Eastern US: 12brteedoy0f)'
+        required: false
+        type: string
+        default: '3eb9t1559lkv'
+
+jobs:
+  download-and-upload:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests
+        
+    - name: Download file
+      id: download
+      run: |
+        # Define nome do arquivo
+        if [ -n "${{ github.event.inputs.file_name }}" ]; then
+          FILENAME="${{ github.event.inputs.file_name }}"
+        else
+          FILENAME=$(basename "${{ github.event.inputs.file_url }}")
+        fi
+        
+        echo "Baixando arquivo: $FILENAME"
+        
+        # Baixa o arquivo
+        wget -O "$FILENAME" "${{ github.event.inputs.file_url }}"
+        
+        # Verifica se download foi bem sucedido
+        if [ -f "$FILENAME" ]; then
+          echo "file_path=$FILENAME" >> $GITHUB_OUTPUT
+          FILESIZE=$(stat -c%s "$FILENAME")
+          echo "Tamanho: $((FILESIZE / 1024 / 1024))MB"
+        else
+          echo "❌ Falha no download"
+          exit 1
+        fi
+        
+    - name: Upload to Buzzheavier
+      id: upload
+      env:
+        LOCATION_ID: ${{ github.event.inputs.location_id || '3eb9t1559lkv' }}
+      run: |
+        python << 'EOF'
+        import requests
+        import os
+        import sys
+        import json
+        
+        file_path = "${{ steps.download.outputs.file_path }}"
+        location_id = os.environ['LOCATION_ID']
+        
+        if not os.path.exists(file_path):
+            print("❌ Arquivo não encontrado")
+            sys.exit(1)
+        
+        # Tente descobrir a API correta
+        base_url = "https://w.buzzheavier.com"
+        
+        # Método 1: PUT direto (baseado no curl)
+        try:
+            print(f"📤 Tentando upload via PUT...")
+            with open(file_path, 'rb') as f:
+                file_name = os.path.basename(file_path)
+                response = requests.put(
+                    f"{base_url}/{file_name}",
+                    data=f,
+                    headers={
+                        'X-Location-ID': location_id,
+                        'Content-Type': 'application/octet-stream'
+                    }
+                )
+                
+                if response.status_code in [200, 201]:
+                    print(f"✅ Upload bem-sucedido!")
+
+                    # Parse da resposta JSON
+                    response_data = json.loads(response.text)
+
+                    # Extrair o ID
+                    id_resposta = response_data['data']['id']
+
+                    # Configurações
+                    BASE_SITE = "buzzheavier.com"
+
+                    # Criar a URL
+                    urlmontada = f"https://{BASE_SITE}/{id_resposta}"
+
+                    print(f"ID extraído: {id_resposta}")
+                    print(f"URL gerada: {urlmontada}")
+                    print(f"::set-output name=download_url::{urlmontada}")
+                    sys.exit(0)
+                else:
+                    print(f"⚠️  PUT falhou: {response.status_code}")
+                    print(f"Resposta: {response.text}")
+        except Exception as e:
+            print(f"❌ Erro no PUT: {e}")
+        
+        # Método 2: Multipart form (fallback)
+        try:
+            print(f"📤 Tentando upload via multipart form...")
+            with open(file_path, 'rb') as f:
+                files = {'file': (os.path.basename(file_path), f)}
+                data = {
+                    'locationId': location_id,
+                    'directoryId': ''
+                }
+                
+                response = requests.post(
+                    f"{base_url}/upload",
+                    files=files,
+                    data=data
+                )
+                
+                if response.status_code in [200, 201]:
+                    print(f"✅ Upload bem-sucedido!")
+
+                    # Parse da resposta JSON
+                    response_data = json.loads(response.text)
+
+                    # Extrair o ID
+                    id_resposta = response_data['data']['id']
+
+                    # Configurações
+                    BASE_SITE = "buzzheavier.com"
+
+                    # Criar a URL
+                    urlmontada = f"https://{BASE_SITE}/{id_resposta}"
+
+                    print(f"ID extraído: {id_resposta}")
+                    print(f"URL gerada: {urlmontada}")
+                    print(f"::set-output name=download_url::{urlmontada}")
+                else:
+                    print(f"❌ POST falhou: {response.status_code}")
+                    print(f"Resposta: {response.text}")
+                    sys.exit(1)
+                    
+        except Exception as e:
+            print(f"❌ Erro no POST: {e}")
+            sys.exit(1)
+        EOF
+    
+    - name: Create summary
+      if: always()
+      run: |
+        echo "## 📊 Resumo do Upload" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Arquivo:** ${{ steps.download.outputs.file_path }}" >> $GITHUB_STEP_SUMMARY
+        echo "**URL de origem:** ${{ github.event.inputs.file_url }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Localização:** ${{ github.event.inputs.location_id || '3eb9t1559lkv' }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        if [ -n "${{ steps.upload.outputs.download_url }}" ]; then
+          echo "**✅ Upload concluído!**" >> $GITHUB_STEP_SUMMARY
+          echo "**📎 Link:** ${{ steps.upload.outputs.download_url }}" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "**❌ Upload falhou**" >> $GITHUB_STEP_SUMMARY
+        fi
+    
+    - name: Cleanup
+      if: always()
+      run: |
+        # Remove arquivo baixado
+        if [ -f "${{ steps.download.outputs.file_path }}" ]; then
+          rm "${{ steps.download.outputs.file_path }}"
+          echo "🧹 Arquivo temporário removido"
+        fi

@@ -1,0 +1,247 @@
+name: Torrent Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      magnet_link:
+        description: 'Magnet link ou URL do arquivo .torrent'
+        required: true
+        type: string
+      output_filename:
+        description: 'Nome personalizado para o arquivo baixado (opcional)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  download_torrent:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Generate tag name
+      id: tag
+      run: |
+        TAG_NAME="torrent-$(date +%Y%m%d-%H%M%S)"
+        echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+        echo "Tag gerada: $TAG_NAME"
+
+    - name: Install dependencies
+      id: install_deps
+      run: |
+        echo "📥 Instalando dependências..."
+        sudo apt-get update
+        sudo apt-get install -y aria2 curl jq wget unzip
+        echo "✅ Dependências instaladas"
+
+    - name: Setup download directory
+      run: |
+        mkdir -p torrent_downloads
+        cd torrent_downloads
+
+    - name: Download using aria2 (simpler method)
+      id: download_torrent
+      run: |
+        echo "🔗 Iniciando download via torrent..."
+        echo "Magnet link: ${{ github.event.inputs.magnet_link }}"
+        
+        cd torrent_downloads
+        
+        # Método 1: Tentar com aria2 (mais simples e confiável)
+        echo "🔄 Usando aria2 para download..."
+        
+        # Configurar aria2
+        CONFIG_FILE="aria2.conf"
+        cat > "$CONFIG_FILE" << EOF
+        dir=./
+        continue=true
+        max-connection-per-server=16
+        min-split-size=1M
+        split=16
+        max-concurrent-downloads=5
+        max-overall-download-limit=0
+        max-overall-upload-limit=1K
+        seed-time=0
+        EOF
+        
+        # Baixar usando aria2
+        if [[ "${{ github.event.inputs.magnet_link }}" == *"magnet:"* ]]; then
+          aria2c --conf-path="$CONFIG_FILE" "${{ github.event.inputs.magnet_link }}"
+        else
+          # Se for URL de arquivo .torrent
+          wget "${{ github.event.inputs.magnet_link }}" -O torrent.torrent
+          aria2c --conf-path="$CONFIG_FILE" torrent.torrent
+        fi
+        
+        # Verificar se algo foi baixado
+        DOWNLOADED_FILES=$(find . -type f -not -name "*.conf" -not -name "*.torrent" | head -5)
+        
+        if [ -z "$DOWNLOADED_FILES" ]; then
+          echo "⚠️ Nenhum arquivo encontrado após download. Tentando método alternativo..."
+          
+          # Método alternativo: transmission-cli
+          sudo apt-get install -y transmission-cli
+          
+          if [[ "${{ github.event.inputs.magnet_link }}" == *"magnet:"* ]]; then
+            transmission-cli -w ./ -f /tmp/complete.sh "${{ github.event.inputs.magnet_link }}"
+          else
+            wget "${{ github.event.inputs.magnet_link }}" -O torrent.torrent
+            transmission-cli -w ./ -f /tmp/complete.sh torrent.torrent
+          fi
+          
+          # Aguardar um tempo para download
+          sleep 30
+          pkill transmission-cli || true
+        fi
+        
+        # Listar arquivos baixados
+        echo "📁 Conteúdo baixado:"
+        ls -la ./
+        
+        # Encontrar arquivos
+        FILES_COUNT=$(find . -type f -not -name "*.conf" -not -name "*.torrent" -not -name "complete.sh" | wc -l)
+        
+        if [ "$FILES_COUNT" -eq 0 ]; then
+          echo "❌ Nenhum arquivo foi baixado"
+          exit 1
+        fi
+        
+        # Determinar nome do arquivo
+        cd ..
+        
+        if [ -n "${{ github.event.inputs.output_filename }}" ] && [ "${{ github.event.inputs.output_filename }}" != "" ]; then
+          CUSTOM_NAME="${{ github.event.inputs.output_filename }}"
+          
+          if [ "$FILES_COUNT" -eq 1 ]; then
+            # Um único arquivo
+            SINGLE_FILE=$(find torrent_downloads -type f -not -name "*.conf" -not -name "*.torrent" -not -name "complete.sh" | head -1)
+            FILENAME="$CUSTOM_NAME"
+            cp "$SINGLE_FILE" "$FILENAME"
+          else
+            # Múltiplos arquivos - compactar
+            FILENAME="$CUSTOM_NAME.zip"
+            echo "📦 Múltiplos arquivos detectados. Compactando como $FILENAME..."
+            cd torrent_downloads
+            zip -r "../$FILENAME" . -x "*.conf" "*.torrent" "complete.sh"
+            cd ..
+          fi
+        else
+          # Usar nome automático
+          if [ "$FILES_COUNT" -eq 1 ]; then
+            SINGLE_FILE=$(find torrent_downloads -type f -not -name "*.conf" -not -name "*.torrent" -not -name "complete.sh" | head -1)
+            FILENAME=$(basename "$SINGLE_FILE")
+            cp "$SINGLE_FILE" "$FILENAME"
+          else
+            # Múltiplos arquivos - compactar
+            FILENAME="torrent_download_$(date +%Y%m%d_%H%M%S).zip"
+            echo "📦 Múltiplos arquivos detectados. Compactando como $FILENAME..."
+            cd torrent_downloads
+            zip -r "../$FILENAME" . -x "*.conf" "*.torrent" "complete.sh"
+            cd ..
+          fi
+        fi
+        
+        echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+        echo "✅ Processo de download concluído: $FILENAME"
+        
+        # Mostrar tamanho do arquivo
+        if [ -f "$FILENAME" ]; then
+          FILESIZE=$(stat -c%s "$FILENAME")
+          FILESIZE_MB=$(echo "scale=2; $FILESIZE / 1024 / 1024" | bc)
+          echo "file_size=$FILESIZE" >> $GITHUB_OUTPUT
+          echo "file_size_mb=$FILESIZE_MB" >> $GITHUB_OUTPUT
+          echo "📏 Tamanho do arquivo: $FILESIZE_MB MB"
+        fi
+
+    - name: Prepare file for release
+      id: prepare
+      run: |
+        # Usar outputs do passo anterior ou determinar arquivo
+        if [ -n "${{ steps.download_torrent.outputs.filename }}" ]; then
+          FILENAME="${{ steps.download_torrent.outputs.filename }}"
+        else
+          # Encontrar o arquivo mais recente
+          FILENAME=$(ls -1t *.zip *.mkv *.mp4 *.avi *.iso *.rar *.7z *.tar.gz 2>/dev/null | head -1)
+        fi
+        
+        if [ -z "$FILENAME" ] || [ ! -f "$FILENAME" ]; then
+          echo "❌ ERRO: Nenhum arquivo válido encontrado para release!"
+          echo "Arquivos no diretório:"
+          ls -la
+          exit 1
+        fi
+        
+        # Criar nome seguro (sem caracteres especiais)
+        SAFE_FILENAME=$(echo "$FILENAME" | sed 's/[^a-zA-Z0-9._-]/_/g')
+        
+        # Se nome mudou, renomear
+        if [ "$FILENAME" != "$SAFE_FILENAME" ]; then
+          echo "⚠️ Renomeando para nome seguro: $SAFE_FILENAME"
+          mv "$FILENAME" "$SAFE_FILENAME"
+          FILENAME="$SAFE_FILENAME"
+        fi
+        
+        # Obter informações (se não foram calculadas antes)
+        if [ -z "${{ steps.download_torrent.outputs.file_size }}" ]; then
+          FILESIZE=$(stat -c%s "$FILENAME")
+          FILESIZE_MB=$(echo "scale=2; $FILESIZE / 1024 / 1024" | bc)
+          echo "file_size=$FILESIZE" >> $GITHUB_OUTPUT
+          echo "file_size_mb=$FILESIZE_MB" >> $GITHUB_OUTPUT
+        else
+          FILESIZE="${{ steps.download_torrent.outputs.file_size }}"
+          FILESIZE_MB="${{ steps.download_torrent.outputs.file_size_mb }}"
+        fi
+        
+        echo "📊 Arquivo final: $FILENAME"
+        echo "📏 Tamanho: $FILESIZE bytes ($FILESIZE_MB MB)"
+        
+        echo "final_filename=$FILENAME" >> $GITHUB_OUTPUT
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.tag_name }}
+        name: "Torrent Download: ${{ steps.prepare.outputs.final_filename }}"
+        body: |
+          ## 📥 Download via Torrent
+          
+          **Arquivo:** `${{ steps.prepare.outputs.final_filename }}`
+          **Origem:** ${{ github.event.inputs.magnet_link }}
+          **Tamanho:** ${{ steps.prepare.outputs.file_size_mb || steps.download_torrent.outputs.file_size_mb }} MB
+          **Tag:** ${{ steps.tag.outputs.tag_name }}
+          
+          ---
+          
+          Baixado via GitHub Actions.
+          
+          ⚠️ **Aviso:** Certifique-se de que tem direito a distribuir este conteúdo.
+        draft: false
+        prerelease: false
+        files: |
+          ${{ steps.prepare.outputs.final_filename }}
+
+    - name: Cleanup
+      if: always()
+      run: |
+        echo "🧹 Limpando arquivos temporários..."
+        rm -rf torrent_downloads
+        rm -f *.conf *.torrent complete.sh
+
+    - name: Show success message
+      if: success()
+      run: |
+        echo "✅✅✅ DOWNLOAD VIA TORRENT CONCLUÍDO COM SUCESSO! ✅✅✅"
+        echo ""
+        echo "📦 ARQUIVO: ${{ steps.prepare.outputs.final_filename }}"
+        echo "📏 TAMANHO: ${{ steps.prepare.outputs.file_size_mb || steps.download_torrent.outputs.file_size_mb }} MB"
+        echo "🔗 MAGNET LINK: ${{ github.event.inputs.magnet_link }}"
+        echo "🏷️  TAG: ${{ steps.tag.outputs.tag_name }}"
+        echo ""
+        echo "✅ O arquivo está disponível na seção Releases deste repositório!"
